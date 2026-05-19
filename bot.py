@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # 🔒 從環境變數讀取憑證，保障 GitHub 代碼安全
 TOKEN = "8999179825:AAGMP7VHxI75FniZG8KKv6XsJsuMfcSwudM"
 BOT_USERNAME = "@gapjaibot"
-DATABASE_URL = "postgresql://postgres:[YOUR-PASSWORD]@db.shbztgepcqgchtioixpz.supabase.co:5432/postgres"  # Supabase 連接字串
+DATABASE_URL = "postgresql://postgres:Kaho@03241003@db.shbztgepcqgchtioixpz.supabase.co:5432/postgres"  # Supabase 連接字串
 
 if not TOKEN or not DATABASE_URL:
     print("❌ 錯誤：請確保環境變數 TELEGRAM_BOT_TOKEN 和 DATABASE_URL 已正確設定！")
