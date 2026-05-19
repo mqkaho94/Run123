@@ -13,8 +13,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 from supabase import create_client, Client
 
 # 1. 讀取 Railway 嘅環境變數連去 Supabase
-URL = os.environ.get("SUPABASE_URL")
-KEY = os.environ.get("SUPABASE_KEY")
+URL = os.environ.get("shbztgepcqgchtioixpz")
+KEY = os.environ.get("sb_publishable_bz95cZnnrtNG5iQ7MgHOag_GbQdorDE")
 supabase: Client = create_client(URL, KEY)
 
 # ⚠️ 設定你的 Bot 憑證與用戶名
