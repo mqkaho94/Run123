@@ -3,49 +3,40 @@ from telebot import util
 import random
 import time
 import threading
-import sqlite3
+import psycopg2  # 轉用 PostgreSQL 驅動
 import os
 import json
 from datetime import date
-import os
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-from supabase import create_client, Client
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
-# 1. 讀取 Railway 嘅環境變數連去 Supabase
-URL = os.environ.get("shbztgepcqgchtioixpz")
-KEY = os.environ.get("sb_publishable_bz95cZnnrtNG5iQ7MgHOag_GbQdorDE")
-supabase: Client = create_client(URL, KEY)
-
-# ⚠️ 設定你的 Bot 憑證與用戶名
+# 🔒 從環境變數讀取憑證，保障 GitHub 代碼安全
 TOKEN = "8999179825:AAGMP7VHxI75FniZG8KKv6XsJsuMfcSwudM"
 BOT_USERNAME = "@gapjaibot"
+DATABASE_URL = "postgresql://postgres:[YOUR-PASSWORD]@db.shbztgepcqgchtioixpz.supabase.co:5432/postgres"  # Supabase 連接字串
+
+if not TOKEN or not DATABASE_URL:
+    print("❌ 錯誤：請確保環境變數 TELEGRAM_BOT_TOKEN 和 DATABASE_URL 已正確設定！")
+    exit(1)
 
 # 🚀 啟用多線程 ThreadPool
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=4)
 
-# 🔒 定義每日簽到安全鎖 (防並發連擊)
+# 🔒 定義每日簽到安全鎖
 daily_lock = threading.Lock()
 
-# 🐿️ 基礎 NPC 固定鼠隻名單與其專屬圖標
+# 固定名單與狀態文字
 BASE_NPC_HORSES = [
     ("奧雲狗狗", "⚡"), ("黑旋風", "🌪"), ("戰槌巨人", "⭐"), ("火麒麟", "🔥"), 
     ("疾風", "💨"), ("黃金戰鼠", "🏅"), ("海嘯", "🌊"), ("傲空", "🦅")
 ]
 
-# 🔢 名次對應的數字 Emoji 對照表
-RANK_EMOJIS = {
-    1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣",
-    5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣"
-}
+RANK_EMOJIS = {1: "1️⃣", 2: "2️⃣", 3: "3️⃣", 4: "4️⃣", 5: "5️⃣", 6: "6️⃣", 7: "7️⃣", 8: "8️⃣"}
 
-# 🐾 可供隨機抽取的動物 Emoji 清單
 RANDOM_ANIMAL_EMOJIS = [
     "🦁", "🐼", "🦊", "🐭", "🐨", "🐯", "🐸", "🐷", "🐻", "🐰", 
     "🐵", "🐔", "🐧", "🐦", "🦆", "🦅", "🦉", "🦇", "🐺", "🐗"
 ]
 
-# 📋 清單 A：下注排位表顯示的外觀狀態 (共 20 句)
 BETTING_SURFACE_STATUSES = [
     "鼠神加持🤩高光時刻", "外星物種👽高深莫測", "科技外掛🤖液態金屬", "剛吃興奮劑💊眼神清澈", 
     "昨晚拜神🙏獲得神秘力量", "祖先托夢👑這局穩贏", "賽道车神🏎️自帶BGM", "氣勢如虹😤單眼單挑", 
@@ -55,187 +46,163 @@ BETTING_SURFACE_STATUSES = [
     "靈魂出竅👻呆若木雞", "忘記帶大腦🧠全憑本能"
 ]
 
-# 🎬 清單 B：開局5秒狀態通報
 RACE_START_STATUSES = [
-    "朋友最多轉圈哈姆共你🐹",             
-    "趕住返屋企瀨屎💩",                   
-    "昨晚拜過黃大仙🙏獲得神祕力量加持",   
-    "尋晚飲咗過期維他奶🥛個肚好滾",       
-    "出門口踩到舊大狗屎💩霉運當頭", 
-    "尋晚拉咗十二次斯🚽對腳發軟",
-    "倒瀉咗杯凍檸茶走甜熱辣辣🍹", 
-    "以為自己係比卡超⚡自帶十萬伏特", 
-    "突然叮噹大長篇上身🎒要拯救地球",
-    "阿嬤覺得佢餓👵嫌餵到變咗個波", 
-    "智商突然下線🧠全憑生物本能前進", 
-    "食咗誠實豆沙包💊個人好清醒",
-    "氪金玩家💰全身閃爍住人民幣嘅光芒", 
-    "眼神充滿殺氣🔪覺得自己係黎明", 
-    "自帶背景音樂BGM🎵氣勢如虹",
-    "跛咗隻腳🧑嫌推輪椅代步跑", 
-    "成晚通宵打機🎮條黑眼圈去到下巴", 
-    "飲咗兩啖假酒🥴左右不分亂打打",
-    "失戀萬念毀滅💔打算跑完去跳海", 
-    "高山反應🏔️呼吸困難行得好辛苦"
+    "朋友最多轉圈哈姆共你🐹", "趕住返屋企瀨屎💩", "昨晚拜過黃大仙🙏獲得神祕力量加持",   
+    "尋晚飲咗過期維他奶🥛個肚好滾", "出門口踩到舊大狗屎💩霉運當頭", "尋晚拉咗十二次斯🚽對腳發軟",
+    "倒瀉咗杯凍檸茶走甜熱辣辣🍹", "以為自己係比卡超⚡自帶十萬伏特", "突然叮噹大長篇上身🎒要拯救地球",
+    "阿嬤覺得佢餓👵嫌餵到變咗個波", "智商突然下線🧠全憑生物本能前進", "食咗誠實豆沙包💊個人好清醒",
+    "氪金玩家💰全身閃爍住人民幣嘅光芒", "眼神充滿殺氣🔪覺得自己係黎明", "自帶背景音樂BGM🎵氣勢如虹",
+    "跛咗隻腳🧑嫌推輪椅代步跑", "成晚通宵打機🎮條黑眼圈去到下巴", "飲咗兩啖假酒🥴左右不分亂打打",
+    "失戀萬念毀滅💔打算跑完去跳海", "高山反應🏔️呼吸困難行得好辛苦"
 ]
 
-# 💾 資料庫持久化路徑設定
-DB_FILE = '/data/race.db'
 HORSE_PRICE = 3000  
 
-# ================== 💾 資料庫管理 ==================
+# ================== 💾 Supabase (PostgreSQL) 資料庫管理 ==================
 def init_db():
-    try: os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
-    except: pass
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            chips INTEGER DEFAULT 1000,
-            last_daily TEXT,
-            has_horse INTEGER DEFAULT 0,
-            horse_name TEXT DEFAULT NULL,
-            horse_first INTEGER DEFAULT 0,
-            horse_second INTEGER DEFAULT 0,
-            horse_third INTEGER DEFAULT 0,
-            horse_losses INTEGER DEFAULT 0,
-            last_luck_date TEXT DEFAULT NULL
-        );
-        ''')
-        
-        c.execute('''
-        CREATE TABLE IF NOT EXISTS system_config (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        );
-        ''')
-        
-        c.execute("PRAGMA table_info(users)")
-        columns = [col[1] for col in c.fetchall()]
-        if "horse_first" not in columns: c.execute("ALTER TABLE users ADD COLUMN horse_first INTEGER DEFAULT 0")
-        if "horse_second" not in columns: c.execute("ALTER TABLE users ADD COLUMN horse_second INTEGER DEFAULT 0")
-        if "horse_third" not in columns: c.execute("ALTER TABLE users ADD COLUMN horse_third INTEGER DEFAULT 0")
-        if "horse_losses" not in columns: c.execute("ALTER TABLE users ADD COLUMN horse_losses INTEGER DEFAULT 0")
-        if "last_luck_date" not in columns: c.execute("ALTER TABLE users ADD COLUMN last_luck_date TEXT DEFAULT NULL")
-        conn.commit()
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            # 確保 user_id 使用 BIGINT，防止 Telegram ID 溢位
+            c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                chips BIGINT DEFAULT 1000,
+                last_daily TEXT,
+                has_horse INTEGER DEFAULT 0,
+                horse_name TEXT DEFAULT NULL,
+                horse_first INTEGER DEFAULT 0,
+                horse_second INTEGER DEFAULT 0,
+                horse_third INTEGER DEFAULT 0,
+                horse_losses INTEGER DEFAULT 0,
+                last_luck_date TEXT DEFAULT NULL
+            );
+            ''')
+            
+            c.execute('''
+            CREATE TABLE IF NOT EXISTS system_config (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
+            ''')
+            
+            # PostgreSQL 的欄位升級機制
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS horse_first INTEGER DEFAULT 0;")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS horse_second INTEGER DEFAULT 0;")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS horse_third INTEGER DEFAULT 0;")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS horse_losses INTEGER DEFAULT 0;")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_luck_date TEXT DEFAULT NULL;")
+            conn.commit()
 
 def get_chips(user_id):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT chips FROM users WHERE user_id=?", (user_id,))
-        row = c.fetchone()
-        if not row:
-            c.execute("INSERT INTO users (user_id, chips) VALUES (?, 1000)", (user_id,))
-            conn.commit()
-            return 1000
-        return row[0]
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT chips FROM users WHERE user_id=%s", (user_id,))
+            row = c.fetchone()
+            if not row:
+                c.execute("INSERT INTO users (user_id, chips) VALUES (%s, 1000)", (user_id,))
+                conn.commit()
+                return 1000
+            return row[0]
 
 def update_chips(user_id, amount):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE users SET chips = chips + ? WHERE user_id=?", (amount, user_id))
-        conn.commit()
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE users SET chips = chips + %s WHERE user_id=%s", (amount, user_id))
+            conn.commit()
 
 def get_user_horse(user_id):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT has_horse, horse_name, horse_first, horse_second, horse_third, horse_losses FROM users WHERE user_id=?", (user_id,))
-        row = c.fetchone()
-        if row: 
-            return {"has_horse": row[0], "horse_name": row[1], "first": row[2], "second": row[3], "third": row[4], "losses": row[5]}
-        return {"has_horse": 0, "horse_name": None, "first": 0, "second": 0, "third": 0, "losses": 0}
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT has_horse, horse_name, horse_first, horse_second, horse_third, horse_losses FROM users WHERE user_id=%s", (user_id,))
+            row = c.fetchone()
+            if row: 
+                return {"has_horse": row[0], "horse_name": row[1], "first": row[2], "second": row[3], "third": row[4], "losses": row[5]}
+            return {"has_horse": 0, "horse_name": None, "first": 0, "second": 0, "third": 0, "losses": 0}
 
 def get_owner_by_horse_name(horse_name):
     clean_name = horse_name
     if "." in clean_name: clean_name = clean_name.split(".", 1)[1]
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT user_id FROM users WHERE horse_name=?", (clean_name,))
-        row = c.fetchone()
-        return row[0] if row else None
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT user_id FROM users WHERE horse_name=%s", (clean_name,))
+            row = c.fetchone()
+            return row[0] if row else None
 
 def get_all_registered_horses():
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT user_id, horse_name FROM users WHERE has_horse=1 AND horse_name IS NOT NULL")
-        return c.fetchall()
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT user_id, horse_name FROM users WHERE has_horse=1 AND horse_name IS NOT NULL")
+            return c.fetchall()
 
 def get_all_users_for_luck():
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT user_id, username, has_horse, horse_name, last_luck_date FROM users")
-        return c.fetchall()
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT user_id, username, has_horse, horse_name, last_luck_date FROM users")
+            return c.fetchall()
 
 def update_luck_date(user_id, today_str):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE users SET last_luck_date=? WHERE user_id=?", (today_str, user_id))
-        conn.commit()
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE users SET last_luck_date=%s WHERE user_id=%s", (today_str, user_id))
+            conn.commit()
 
 def sync_username(user_id, username):
     if not username: return
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE users SET username=? WHERE user_id=?", (username.lower(), user_id))
-        conn.commit()
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE users SET username=%s WHERE user_id=%s", (username.lower(), user_id))
+            conn.commit()
 
 def record_detailed_result(user_id, rank_type):
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        if rank_type == 1: c.execute("UPDATE users SET horse_first = horse_first + 1 WHERE user_id=?", (user_id,))
-        elif rank_type == 2: c.execute("UPDATE users SET horse_second = horse_second + 1 WHERE user_id=?", (user_id,))
-        elif rank_type == 3: c.execute("UPDATE users SET horse_third = horse_third + 1 WHERE user_id=?", (user_id,))
-        else: c.execute("UPDATE users SET horse_losses = horse_losses + 1 WHERE user_id=?", (user_id,))
-        conn.commit()
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            if rank_type == 1: c.execute("UPDATE users SET horse_first = horse_first + 1 WHERE user_id=%s", (user_id,))
+            elif rank_type == 2: c.execute("UPDATE users SET horse_second = horse_second + 1 WHERE user_id=%s", (user_id,))
+            elif rank_type == 3: c.execute("UPDATE users SET horse_third = horse_third + 1 WHERE user_id=%s", (user_id,))
+            else: c.execute("UPDATE users SET horse_losses = horse_losses + 1 WHERE user_id=%s", (user_id,))
+            conn.commit()
 
 # ================== 💾 保底機制核心管理 ==================
 def get_system_race_count():
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT value FROM system_config WHERE key='total_races'")
-        row = c.fetchone()
-        if row: return int(row[0])
-        c.execute("INSERT INTO system_config (key, value) VALUES ('total_races', '0')")
-        conn.commit()
-        return 0
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT value FROM system_config WHERE key='total_races'")
+            row = c.fetchone()
+            if row: return int(row[0])
+            c.execute("INSERT INTO system_config (key, value) VALUES ('total_races', '0')")
+            conn.commit()
+            return 0
 
 def increment_system_race_count():
     current = get_system_race_count()
     new_count = current + 1
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE system_config SET value=? WHERE key='total_races'", (str(new_count),))
-        conn.commit()
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE system_config SET value=%s WHERE key='total_races'", (str(new_count),))
+            conn.commit()
     return new_count
 
 def get_guarantee_plan():
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("SELECT value FROM system_config WHERE key='guarantee_plan'")
-        row = c.fetchone()
-        if row: return json.loads(row[0])
-        
-        g_races = random.sample(range(1, 11), 2)
-        plan = {
-            str(g_races[0]): random.choice([1, 2]),
-            str(g_races[1]): random.choice([1, 2])
-        }
-        c.execute("INSERT INTO system_config (key, value) VALUES ('guarantee_plan', ?)", (json.dumps(plan),))
-        conn.commit()
-        return plan
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT value FROM system_config WHERE key='guarantee_plan'")
+            row = c.fetchone()
+            if row: return json.loads(row[0])
+            
+            g_races = random.sample(range(1, 11), 2)
+            plan = {str(g_races[0]): random.choice([1, 2]), str(g_races[1]): random.choice([1, 2])}
+            c.execute("INSERT INTO system_config (key, value) VALUES ('guarantee_plan', %s)", (json.dumps(plan),))
+            conn.commit()
+            return plan
 
 def refresh_guarantee_plan():
     g_races = random.sample(range(1, 11), 2)
-    plan = {
-        str(g_races[0]): random.choice([1, 2]),
-        str(g_races[1]): random.choice([1, 2])
-    }
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE system_config SET value=? WHERE key='guarantee_plan'", (json.dumps(plan),))
-        conn.commit()
+    plan = {str(g_races[0]): random.choice([1, 2]), str(g_races[1]): random.choice([1, 2])}
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE system_config SET value=%s WHERE key='guarantee_plan'", (json.dumps(plan),))
+            conn.commit()
     return plan
 
 init_db()
@@ -266,7 +233,6 @@ def pay_chips(message):
 
         text_clean = message.text
         if f"{BOT_USERNAME}" in text_clean: text_clean = text_clean.replace(f"{BOT_USERNAME}", "")
-        elif f"@run1234567bot" in text_clean.lower(): text_clean = text_clean.lower().replace("@run1234567bot", "")
 
         cmd = text_clean.split()
         if len(cmd) < 2:
@@ -276,16 +242,16 @@ def pay_chips(message):
         if len(cmd) >= 3 and cmd[1].startswith('@'):
             target_username = cmd[1].replace('@', '').strip().lower()
             raw_amount = cmd[2].strip()
-            with sqlite3.connect(DB_FILE) as conn:
-                c = conn.cursor()
-                c.execute("SELECT user_id, username FROM users WHERE username=?", (target_username,))
-                row = c.fetchone()
-                if row:
-                    to_user_id = row[0]
-                    to_username = row[1] if row[1] else target_username
-                else:
-                    bot.reply_to(message, f"❌ **轉帳失敗**：找不到玩家 `@{target_username}`。", parse_mode='Markdown')
-                    return
+            with psycopg2.connect(DATABASE_URL) as conn:
+                with conn.cursor() as c:
+                    c.execute("SELECT user_id, username FROM users WHERE username=%s", (target_username,))
+                    row = c.fetchone()
+                    if row:
+                        to_user_id = row[0]
+                        to_username = row[1] if row[1] else target_username
+                    else:
+                        bot.reply_to(message, f"❌ **轉帳失敗**：找不到玩家 `@{target_username}`。", parse_mode='Markdown')
+                        return
         elif message.reply_to_message:
             if message.reply_to_message.from_user:
                 to_user_id = message.reply_to_message.from_user.id
@@ -447,7 +413,6 @@ def startrun(message):
     else:
         text += f"📊 週期進度：第 {cycle_index}/10 場\n\n"
     
-    # 🎲 事前抽出 8 個不重複嘅隨機動物 Emoji 供本場排位表使用
     round_animal_emojis = random.sample(RANDOM_ANIMAL_EMOJIS, 8)
 
     for idx, h in enumerate(current_horses):
@@ -466,17 +431,10 @@ def startrun(message):
                 is_cold_debuffed = (random.random() < 0.05)  
 
         horse_statuses[h] = {
-            "betting_text": surface_txt,      
-            "start_text": "",                 
-            "target_time": 50.0,  
-            "dead_reason": None,
-            "freeze_steps": 0,       
-            "freeze_reason": "",
-            "is_buff_carrier": has_surface_buff,  
-            "is_debuff_carrier": is_cold_debuffed,            
-            "buff_active": False,
-            "debuff_active": False,
-            "is_guaranteed": (h in guaranteed_cold_horses) 
+            "betting_text": surface_txt, "start_text": "", "target_time": 50.0, 
+            "dead_reason": None, "freeze_steps": 0, "freeze_reason": "",
+            "is_buff_carrier": has_surface_buff, "is_debuff_carrier": is_cold_debuffed,            
+            "buff_active": False, "debuff_active": False, "is_guaranteed": (h in guaranteed_cold_horses) 
         }
 
         if is_cold: 
@@ -500,7 +458,6 @@ def startrun(message):
         if h in guaranteed_cold_horses:
             luck_tag += " ✨[暗影爆發]"
 
-        # 🔧 核心修改：原本嘅 🎪 直接換成隨機動物 Emoji
         animal_emoji = round_animal_emojis[idx]
         text += f"{lane_num} {name_part}{icon}{luck_tag} {animal_emoji} {surface_txt}\n"
         text += f"    {class_icon} 獨贏: {win_odds}倍 | 位置: {place_odds}倍\n"
@@ -529,12 +486,10 @@ def run_race(chat_id):
     status_intro = f"📋 **賽前選手狀態通報** 📋\n" + "‾" * 25 + "\n"
     for h in current_horses:
         start_txt = random.choice(RACE_START_STATUSES)
-        
         if horse_statuses[h]["is_debuff_carrier"]:
             start_txt = "❌ 突然舊患復發！全身發軟手震震"
             
         horse_statuses[h]["start_text"] = start_txt  
-        
         luck_desc = ""
         if active_horse_luck.get(h) == "good": luck_desc = " 🍀(今日幸運加速)"
         elif active_horse_luck.get(h) == "bad": luck_desc = " 💀(今日意外率提升)"
@@ -571,7 +526,6 @@ def run_race(chat_id):
     
     speeds = {h: TOTAL_DISTANCE / horse_statuses[h]["target_time"] for h in current_horses}
     current_distance = {h: 0.0 for h in current_horses}
-    
     finished_horses = []   
     dead_horses = []       
     
@@ -796,13 +750,13 @@ def run_race(chat_id):
 def show_leaderboard(message):
     try:
         sync_username(message.from_user.id, message.from_user.username)
-        with sqlite3.connect(DB_FILE) as conn:
-            c = conn.cursor()
-            c.execute("""
-                SELECT username, horse_name, horse_first, horse_second, horse_third, horse_losses, user_id 
-                FROM users WHERE has_horse = 1 AND horse_name IS NOT NULL
-            """)
-            rows = c.fetchall()
+        with psycopg2.connect(DATABASE_URL) as conn:
+            with conn.cursor() as c:
+                c.execute("""
+                    SELECT username, horse_name, horse_first, horse_second, horse_third, horse_losses, user_id 
+                    FROM users WHERE has_horse = 1 AND horse_name IS NOT NULL
+                """)
+                rows = c.fetchall()
             
         if not rows:
             bot.reply_to(message, "📊 **【賽鼠戰績風雲榜】**\n目前還沒有任何專屬賽鼠的比賽記錄！", parse_mode='Markdown')
@@ -833,7 +787,6 @@ def show_leaderboard(message):
 @bot.message_handler(commands=['win', 'pla', 'ww'])
 def place_bet(message):
     global current_race, race_id, race_odds, user_bet_count, user_actual_deduct, current_horses
-    
     error_help_text = "❌ **投注格式錯誤！**\n👉 獨贏：`/win [編號] [金額]`\n👉 位置：`/pla [編號] [金額]`\n👉 連贏：`/ww [A] [B] [金額]`"
     
     if current_race != "betting":
@@ -847,10 +800,7 @@ def place_bet(message):
         return
 
     text_clean = message.text
-    if f"{BOT_USERNAME}" in text_clean: 
-        text_clean = text_clean.replace(f"{BOT_USERNAME}", "")
-    elif f"@run1234567bot" in text_clean.lower(): 
-        text_clean = text_clean.lower().replace("@run1234567bot", "")
+    if f"{BOT_USERNAME}" in text_clean: text_clean = text_clean.replace(f"{BOT_USERNAME}", "")
 
     cmd = text_clean.split()
     if len(cmd) < 2:
@@ -918,8 +868,7 @@ def place_bet(message):
         user_actual_deduct[user_id] = actual_deduct 
         user_bet_count[user_id] = 1
 
-        if user_id not in race_bets[race_id]: 
-            race_bets[race_id][user_id] = []
+        if user_id not in race_bets[race_id]: race_bets[race_id][user_id] = []
         race_bets[race_id][user_id].append((bet_type, selected_horse_full, bet_amount))
 
         type_title = "獨贏" if bet_type == "win" else "位置" if bet_type == "pla" else "連贏"
@@ -954,15 +903,15 @@ def daily(message):
     today = date.today().isoformat()  
     
     with daily_lock:
-        with sqlite3.connect(DB_FILE) as conn:
-            c = conn.cursor()
-            c.execute("SELECT last_daily FROM users WHERE user_id=?", (user_id,))
-            last = c.fetchone()
-            if last and last[0] == today:
-                bot.reply_to(message, "❌ 你今天已經領過每日獎勵！明天再來吧。")
-                return
-            c.execute("UPDATE users SET last_daily=? WHERE user_id=?", (today, user_id))
-            conn.commit()
+        with psycopg2.connect(DATABASE_URL) as conn:
+            with conn.cursor() as c:
+                c.execute("SELECT last_daily FROM users WHERE user_id=%s", (user_id,))
+                last = c.fetchone()
+                if last and last[0] == today:
+                    bot.reply_to(message, "❌ 你今天已經領過每日獎勵！明天再來吧。")
+                    return
+                c.execute("UPDATE users SET last_daily=%s WHERE user_id=%s", (today, user_id))
+                conn.commit()
             
         update_chips(user_id, 3000)
         bot.reply_to(message, "✅ **每日簽到成功！** +3000 金幣 💰")
@@ -991,10 +940,10 @@ def buy_horse(message):
     if len(h_name) < 1 or len(h_name) > 15 or chips < HORSE_PRICE: return
 
     update_chips(user_id, -HORSE_PRICE)
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE users SET has_horse=1, horse_name=?, horse_first=0, horse_second=0, horse_third=0, horse_losses=0 WHERE user_id=?", (h_name, user_id))
-        conn.commit()
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE users SET has_horse=1, horse_name=%s, horse_first=0, horse_second=0, horse_third=0, horse_losses=0 WHERE user_id=%s", (h_name, user_id))
+            conn.commit()
     bot.reply_to(message, f"🎉 專屬愛鼠 **「{h_name}」** 登記成功！戰績已初始化。")
 
 @bot.message_handler(commands=['rename'])
@@ -1007,10 +956,10 @@ def rename_horse(message):
     if len(cmd) < 2: return
     new_name = cmd[1].strip()
     if len(new_name) < 1 or len(new_name) > 15: return
-    with sqlite3.connect(DB_FILE) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE users SET horse_name=? WHERE user_id=?", (new_name, user_id))
-        conn.commit()
+    with psycopg2.connect(DATABASE_URL) as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE users SET horse_name=%s WHERE user_id=%s", (new_name, user_id))
+            conn.commit()
     bot.reply_to(message, f"✨ 愛鼠已更名為：**「{new_name}」** 🐿️")
 
 @bot.message_handler(commands=['money'])
@@ -1040,6 +989,26 @@ def help_cmd(message):
 """
     bot.reply_to(message, text, parse_mode='HTML')
 
+# ================== 🛡️ Railway 存活專用迷你健康檢查伺服器 ==================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive!")
+    def log_message(self, format, *args):
+        pass # 保持日誌乾淨
+
+def run_health_check():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
+
 # ================== 啟動服務 ==================
-print(f"🐿️ {BOT_USERNAME} 【最新冷門保底隨機數量版】啟動！")
-bot.infinity_polling(timeout=20, long_polling_timeout=10)
+if __name__ == "__main__":
+    print(f"🐿️ {BOT_USERNAME} 雲端Supabase版啟動中...")
+    
+    # 在背景啟動健康檢查，欺騙 Railway 的端口監聽檢測
+    threading.Thread(target=run_health_check, daemon=True).start()
+    
+    # 啟動 Bot
+    bot.infinity_polling(timeout=20, long_polling_timeout=10)
