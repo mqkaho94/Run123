@@ -3,11 +3,154 @@ from telebot import util
 import random
 import time
 import threading
-import sqlite3
+import psycopg2  # 💡 這裡由 sqlite3 改為 psycopg2
+from psycopg2.extras import DictCursor # 💡 讓查詢結果能像原本的 sqlite 一樣用欄位名稱讀取
 import os
 import json
 from datetime import date
 
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "你的_TOKEN")
+BOT_USERNAME = "@Run1234567bot"
+
+# 💡 從環境變數讀取 Supabase URI（安全性高），本機測試可直接把字串貼在後面當備份
+SUPABASE_URI = os.getenv("SUPABASE_DB_URI", "把你在步驟一複製的_postgresql://...URI字串貼在這裡")
+
+bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=4)
+daily_lock = threading.Lock()
+
+# ================== 💡 SUPABASE 資料庫管理 ==================
+def get_db_connection():
+    """連線到雲端 Supabase PostgreSQL 資料庫"""
+    # 使用 DictCursor 完美相容原本的 sqlite3 Row 功能
+    conn = psycopg2.connect(SUPABASE_URI, cursor_factory=DictCursor)
+    return conn
+
+def get_chips(user_id):
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT chips FROM users WHERE user_id=%s", (user_id,)) # 💡 Postgres 語法標記改為 %s
+            row = c.fetchone()
+            if not row:
+                c.execute("INSERT INTO users (user_id, chips) VALUES (%s, 1000)", (user_id,))
+                conn.commit()
+                return 1000
+            return row['chips'] # 💡 原本是 row[0]，改為欄位名稱取值更安全
+
+def update_chips(user_id, amount):
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE users SET chips = chips + %s WHERE user_id=%s", (amount, user_id))
+            conn.commit()
+
+def get_user_horse(user_id):
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT has_horse, horse_name, horse_first, horse_second, horse_third, horse_losses FROM users WHERE user_id=%s", (user_id,))
+            row = c.fetchone()
+            if row: 
+                return {"has_horse": row['has_horse'], "horse_name": row['horse_name'], "first": row['horse_first'], "second": row['horse_second'], "third": row['horse_third'], "losses": row['horse_losses']}
+            return {"has_horse": 0, "horse_name": None, "first": 0, "second": 0, "third": 0, "losses": 0}
+
+def get_owner_by_horse_name(horse_name):
+    clean_name = horse_name.split(".", 1)[1] if "." in horse_name else horse_name
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT user_id FROM users WHERE horse_name=%s", (clean_name,))
+            row = c.fetchone()
+            return row['user_id'] if row else None
+
+def get_all_registered_horses():
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT user_id, horse_name FROM users WHERE has_horse=1 AND horse_name IS NOT NULL")
+            return c.fetchall()
+
+def get_all_users_for_luck():
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT user_id, username, has_horse, horse_name, last_luck_date FROM users")
+            return c.fetchall()
+
+def update_luck_date(user_id, today_str):
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE users SET last_luck_date=%s WHERE user_id=%s", (today_str, user_id))
+            conn.commit()
+
+def sync_username(user_id, username):
+    if not username: return
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE users SET username=%s WHERE user_id=%s", (username.lower(), user_id))
+            conn.commit()
+
+def record_detailed_result(user_id, rank_type):
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            if rank_type == 1: c.execute("UPDATE users SET horse_first = horse_first + 1 WHERE user_id=%s", (user_id,))
+            elif rank_type == 2: c.execute("UPDATE users SET horse_second = horse_second + 1 WHERE user_id=%s", (user_id,))
+            elif rank_type == 3: c.execute("UPDATE users SET horse_third = horse_third + 1 WHERE user_id=%s", (user_id,))
+            else: c.execute("UPDATE users SET horse_losses = horse_losses + 1 WHERE user_id=%s", (user_id,))
+            conn.commit()
+
+# ================== 💡 保底機制管理 (Postgres 版) ==================
+def get_system_race_count():
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT value FROM system_config WHERE key='total_races'")
+            row = c.fetchone()
+            if row: return int(row['value'])
+            c.execute("INSERT INTO system_config (key, value) VALUES ('total_races', '0')")
+            conn.commit()
+            return 0
+
+def increment_system_race_count():
+    current = get_system_race_count()
+    new_count = current + 1
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE system_config SET value=%s WHERE key='total_races'", (str(new_count),))
+            conn.commit()
+    return new_count
+
+def get_guarantee_plan():
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT value FROM system_config WHERE key='guarantee_plan'")
+            row = c.fetchone()
+            if row: return json.loads(row['value'])
+            
+            g_races = random.sample(range(1, 11), 2)
+            plan = {str(g_races[0]): random.choice([1, 2]), str(g_races[1]): random.choice([1, 2])}
+            c.execute("INSERT INTO system_config (key, value) VALUES ('guarantee_plan', %s)", (json.dumps(plan),))
+            conn.commit()
+            return plan
+
+def refresh_guarantee_plan():
+    g_races = random.sample(range(1, 11), 2)
+    plan = {str(g_races[0]): random.choice([1, 2]), str(g_races[1]): random.choice([1, 2])}
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("UPDATE system_config SET value=%s WHERE key='guarantee_plan'", (json.dumps(plan),))
+            conn.commit()
+    return plan
+
+def daily(message):
+    user_id = message.from_user.id
+    today = date.today().isoformat()  
+    with get_db_connection() as conn:
+        with conn.cursor() as c:
+            c.execute("SELECT last_daily FROM users WHERE user_id=%s", (user_id,))
+            row = c.fetchone()
+            if row and row['last_daily'] == today:
+                bot.reply_to(message, "⚠️ 你今天已經領過每日獎勵！明天再來吧。")
+                return
+            c.execute("UPDATE users SET last_daily=%s WHERE user_id=%s", (today, user_id))
+            conn.commit()
+    update_chips(user_id, 3000)
+    bot.reply_to(message, "🎁 **每日簽到成功！** +3000 金幣")
+
+# ... 程式碼其餘部分的賽馬直播邏輯保持不變 ...
 # 1. 設定你的 Bot 憑證 (強烈建議改用環境變數 os.getenv 讀取)
 TOKEN = os.getenv("8999179825:AAGMP7VHxI75FniZG8KKv6XsJsuMfcSwudM")
 BOT_USERNAME = "@gapjaibot"
