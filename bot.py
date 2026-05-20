@@ -9,11 +9,11 @@ import os
 import json
 from datetime import date
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "你的_TOKEN")
-BOT_USERNAME = "@Run1234567bot"
+TOKEN = os.getenv("8999179825:AAGMP7VHxI75FniZG8KKv6XsJsuMfcSwudM")
+BOT_USERNAME = "@gapjaibot"
 
 # 💡 從環境變數讀取 Supabase URI（安全性高），本機測試可直接把字串貼在後面當備份
-SUPABASE_URI = os.getenv("SUPABASE_DB_URI", "把你在步驟一複製的_postgresql://...URI字串貼在這裡")
+SUPABASE_URI = os.getenv("postgresql://hidden:Kaho@03241003@hidden:5432//postgres:Kaho@03241003@db.shbztgepcqgchtioixpz.supabase.co:5432/postgres")
 
 bot = telebot.TeleBot(TOKEN, threaded=True, num_threads=4)
 daily_lock = threading.Lock()
