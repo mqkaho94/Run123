@@ -1,2 +1,3 @@
 pyTelegramBotAPI
 Flask
+pip install psycopg2-binary pyTelegramBotAPI
